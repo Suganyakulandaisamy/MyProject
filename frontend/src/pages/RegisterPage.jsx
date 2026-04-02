@@ -1,7 +1,9 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { apiRequest } from "../api";
 
 export default function RegisterPage() {
+  const navigate = useNavigate();
   const [form, setForm] = useState({ username: "", password: "", role: "Student" });
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -23,7 +25,7 @@ export default function RegisterPage() {
       });
       setSuccess("Account created. Redirecting to login...");
       setTimeout(() => {
-        window.location.href = "/";
+        navigate("/", { replace: true });
       }, 1200);
     } catch (err) {
       setError(err.message || "Registration failed");
@@ -67,8 +69,7 @@ export default function RegisterPage() {
           <button className="primary" type="submit" disabled={loading}>
             {loading ? "Creating..." : "Register"}
           </button>
-          <button className="ghost" type="button" onClick={() => (window.location.href = "/")}
-          >
+          <button className="ghost" type="button" onClick={() => navigate("/")}>
             Back to Login
           </button>
         </div>

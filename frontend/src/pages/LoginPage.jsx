@@ -1,7 +1,9 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { apiRequest, storeUser } from "../api";
 
 export default function LoginPage() {
+  const navigate = useNavigate();
   const [form, setForm] = useState({ username: "", password: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -21,11 +23,11 @@ export default function LoginPage() {
       });
       storeUser(user);
       if (user.role === "Admin") {
-        window.location.href = "/admin-dashboard";
+        navigate("/admin-dashboard", { replace: true });
       } else if (user.role === "Faculty") {
-        window.location.href = "/faculty-dashboard";
+        navigate("/faculty-dashboard", { replace: true });
       } else {
-        window.location.href = "/student-dashboard";
+        navigate("/student-dashboard", { replace: true });
       }
     } catch (err) {
       setError(err.message || "Login failed");
@@ -73,7 +75,7 @@ export default function LoginPage() {
           <button
             className="ghost"
             type="button"
-            onClick={() => (window.location.href = "/register")}
+            onClick={() => navigate("/register")}
           >
             Create Account
           </button>

@@ -31,7 +31,7 @@ function Layout({ title, children }) {
             className="ghost"
             onClick={() => {
               clearUser();
-              window.location.href = "/";
+              window.location.href = import.meta.env.BASE_URL;
             }}
           >
             Logout
@@ -63,8 +63,9 @@ function Layout({ title, children }) {
 }
 
 export default function App() {
+  const base = import.meta.env.BASE_URL.replace(/\/$/, "");
   return (
-    <BrowserRouter basename="/MyProject">
+    <BrowserRouter basename={base}>
       <Routes>
         <Route path="/" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />

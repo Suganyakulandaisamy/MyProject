@@ -1,4 +1,4 @@
-const BASE_URL = "http://localhost:5000/api";
+const BASE_URL = "https://myproject-8okl.onrender.com/api";
 
 export function getStoredUser() {
   const raw = localStorage.getItem("aaqap_user");
