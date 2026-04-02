@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { apiRequest } from "../api";
 
 export default function FacultyDashboard() {
+  const navigate = useNavigate();
   const [rows, setRows] = useState([]);
   const [error, setError] = useState("");
 
@@ -25,8 +27,7 @@ export default function FacultyDashboard() {
           <h2>Teaching Records</h2>
           <p className="subtle">Manage your submitted teaching data and status.</p>
         </div>
-        <button className="primary" onClick={() => (window.location.href = "/faculty/form")}
-        >
+        <button className="primary" onClick={() => navigate("/faculty/form")}>
           New Entry
         </button>
       </div>
@@ -62,7 +63,7 @@ export default function FacultyDashboard() {
                     className="ghost"
                     onClick={() => {
                       localStorage.setItem("aaqap_edit_faculty", JSON.stringify(row));
-                      window.location.href = "/faculty/form";
+                      navigate("/faculty/form");
                     }}
                   >
                     Edit

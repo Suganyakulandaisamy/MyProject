@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate, Link } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, Link, useNavigate } from "react-router-dom";
 import { getStoredUser, clearUser } from "./api";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
@@ -19,6 +19,7 @@ function ProtectedRoute({ children, roles }) {
 
 function Layout({ title, children }) {
   const user = getStoredUser();
+  const navigate = useNavigate();
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -31,7 +32,7 @@ function Layout({ title, children }) {
             className="ghost"
             onClick={() => {
               clearUser();
-              window.location.href = import.meta.env.BASE_URL;
+              navigate("/", { replace: true });
             }}
           >
             Logout
