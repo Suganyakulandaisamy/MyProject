@@ -1,8 +1,4 @@
-import mongoose from "mongoose";
-import Faculty from "../models/Faculty.js";
-import Subject from "../models/Subject.js";
-import Feedback from "../models/Feedback.js";
-import Notification from "../models/Notification.js";
+import { query } from "../db.js";
 
 function evaluateQuality(passPercentage, avgRating) {
   if (avgRating === null || avgRating === undefined) {
@@ -11,25 +7,48 @@ function evaluateQuality(passPercentage, avgRating) {
   return passPercentage >= 75 && avgRating >= 4 ? "Good" : "Need Improvement";
 }
 
-function escapeRegex(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function toIntId(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) return null;
+  return parsed;
 }
 
-async function upsertSubject(name, facultyId) {
+function mapFacultyRow(row) {
+  return {
+    id: String(row.id),
+    user_id: row.user_id ? String(row.user_id) : null,
+    subject_id: row.subject_id ? String(row.subject_id) : null,
+    name: row.name,
+    department: row.department,
+    subject: row.subject,
+    semester: row.semester,
+    academic_year: row.academic_year,
+    pass_percentage: row.pass_percentage === null ? null : Number(row.pass_percentage),
+    avg_rating: row.avg_rating === null || row.avg_rating === undefined ? null : Number(row.avg_rating),
+    quality_status: row.quality_status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+async function upsertSubject(name) {
   const normalized = String(name).trim();
-  const subject = await Subject.findOneAndUpdate(
-    { name: normalized },
-    { name: normalized, facultyId },
-    { upsert: true, new: true }
-  );
-  return subject;
+  const existing = await query("SELECT id FROM subjects WHERE name = ? LIMIT 1", [
+    normalized
+  ]);
+  if (existing.length) return existing[0];
+
+  const result = await query("INSERT INTO subjects (name, faculty_id) VALUES (?, NULL)", [
+    normalized
+  ]);
+  return { id: result.insertId };
 }
 
 async function clearSubjectIfOwned(subjectId, facultyId) {
   if (!subjectId) return;
-  await Subject.updateOne(
-    { _id: subjectId, facultyId },
-    { $set: { facultyId: null } }
+  await query(
+    "UPDATE subjects SET faculty_id = NULL WHERE id = ? AND faculty_id = ?",
+    [subjectId, facultyId]
   );
 }
 
@@ -59,25 +78,49 @@ export async function addFaculty(req, res) {
 
   const quality_status = evaluateQuality(passValue, null);
   const ownerId = req.user.role === "Admin" && user_id ? user_id : req.user.id;
+  const ownerInt = toIntId(ownerId);
+  if (!ownerInt) {
+    return res.status(400).json({ message: "Invalid user session. Please login again." });
+  }
 
   try {
-    const subjectDoc = await upsertSubject(subject, null);
+    const subjectDoc = await upsertSubject(subject);
 
-    const doc = await Faculty.create({
-      userId: ownerId,
-      name,
-      department,
-      subject: String(subject).trim(),
-      semester: String(semester).trim(),
-      academic_year: String(academic_year).trim(),
-      subjectId: subjectDoc._id,
-      pass_percentage: passValue,
-      quality_status
-    });
+    const result = await query(
+      `
+        INSERT INTO faculty
+          (user_id, name, department, subject, semester, academic_year, subject_id, pass_percentage, quality_status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      [
+        ownerInt,
+        name,
+        department,
+        String(subject).trim(),
+        String(semester).trim(),
+        String(academic_year).trim(),
+        subjectDoc.id,
+        passValue,
+        quality_status
+      ]
+    );
 
-    await Subject.updateOne({ _id: subjectDoc._id }, { $set: { facultyId: doc._id } });
+    const facultyId = result.insertId;
+    await query("UPDATE subjects SET faculty_id = ? WHERE id = ?", [
+      facultyId,
+      subjectDoc.id
+    ]);
 
-    return res.status(201).json(doc.toJSON());
+    const rows = await query(
+      `
+        SELECT f.*, NULL AS avg_rating, f.quality_status AS quality_status
+        FROM faculty f
+        WHERE f.id = ?
+      `,
+      [facultyId]
+    );
+
+    return res.status(201).json(mapFacultyRow(rows[0]));
   } catch (err) {
     return res.status(500).json({ message: "Failed to add faculty data.", error: err.message });
   }
@@ -98,62 +141,91 @@ export async function updateFaculty(req, res) {
 
   const quality_status = evaluateQuality(passValue, null);
 
+  const facultyId = toIntId(id);
+  if (!facultyId) {
+    return res.status(400).json({ message: "Invalid faculty id." });
+  }
+
   try {
-    const query = { _id: id };
+    const filters = ["id = ?"];
+    const params = [facultyId];
+
     if (req.user.role === "Faculty") {
-      if (!mongoose.Types.ObjectId.isValid(req.user.id)) {
+      const userId = toIntId(req.user.id);
+      if (!userId) {
         return res.status(400).json({ message: "Invalid user session. Please login again." });
       }
-      query.userId = req.user.id;
+      filters.push("user_id = ?");
+      params.push(userId);
     }
 
-    const existing = await Faculty.findOne(query);
+    const existingRows = await query(
+      `SELECT * FROM faculty WHERE ${filters.join(" AND ")} LIMIT 1`,
+      params
+    );
+    const existing = existingRows[0];
     if (!existing) {
       return res.status(404).json({ message: "Faculty record not found." });
     }
 
-    const subjectDoc = await upsertSubject(subject, null);
+    const subjectDoc = await upsertSubject(subject);
 
-    const doc = await Faculty.findOneAndUpdate(
-      query,
-      {
+    await query(
+      `
+        UPDATE faculty
+        SET name = ?, department = ?, subject = ?, semester = ?, academic_year = ?,
+            subject_id = ?, pass_percentage = ?, quality_status = ?
+        WHERE ${filters.join(" AND ")}
+      `,
+      [
         name,
         department,
-        subject: String(subject).trim(),
-        semester: String(semester).trim(),
-        academic_year: String(academic_year).trim(),
-        subjectId: subjectDoc._id,
-        pass_percentage: passValue,
-        quality_status
-      },
-      { new: true }
+        String(subject).trim(),
+        String(semester).trim(),
+        String(academic_year).trim(),
+        subjectDoc.id,
+        passValue,
+        quality_status,
+        ...params
+      ]
     );
 
-    if (existing.subjectId?.toString() !== subjectDoc._id.toString()) {
-      await clearSubjectIfOwned(existing.subjectId, existing._id);
+    if (existing.subject_id !== subjectDoc.id) {
+      await clearSubjectIfOwned(existing.subject_id, existing.id);
     }
-    await Subject.updateOne({ _id: subjectDoc._id }, { $set: { facultyId: doc._id } });
-
-    const stats = await Feedback.aggregate([
-      { $match: { facultyId: new mongoose.Types.ObjectId(doc._id) } },
-      { $group: { _id: "$facultyId", avg_rating: { $avg: "$rating" } } }
+    await query("UPDATE subjects SET faculty_id = ? WHERE id = ?", [
+      existing.id,
+      subjectDoc.id
     ]);
-    const avgRating = stats[0]?.avg_rating ?? null;
+
+    const avgRows = await query(
+      "SELECT AVG(rating) AS avg_rating FROM feedbacks WHERE faculty_id = ?",
+      [existing.id]
+    );
+    const avgRating = avgRows[0]?.avg_rating ?? null;
     const updatedQuality = evaluateQuality(passValue, avgRating);
-    if (updatedQuality !== doc.quality_status) {
-      await Faculty.updateOne(
-        { _id: doc._id },
-        { $set: { quality_status: updatedQuality } }
-      );
+    if (updatedQuality !== existing.quality_status) {
+      await query("UPDATE faculty SET quality_status = ? WHERE id = ?", [
+        updatedQuality,
+        existing.id
+      ]);
       if (updatedQuality === "Need Improvement") {
-        await Notification.create({
-          message: `${doc.name} performance needs improvement`
-        });
+        await query("INSERT INTO notifications (message) VALUES (?)", [
+          `${existing.name} performance needs improvement`
+        ]);
       }
-      doc.quality_status = updatedQuality;
     }
 
-    return res.json(doc.toJSON());
+    const rows = await query(
+      `
+        SELECT f.*, ? AS avg_rating, ? AS quality_status
+        FROM faculty f
+        WHERE f.id = ?
+      `,
+      [avgRating, updatedQuality, existing.id]
+    );
+
+    return res.json(mapFacultyRow(rows[0]));
   } catch (err) {
     return res.status(500).json({ message: "Failed to update faculty data.", error: err.message });
   }
@@ -161,12 +233,18 @@ export async function updateFaculty(req, res) {
 
 export async function listFaculty(req, res) {
   try {
-    const filter = req.user.role === "Faculty"
-      ? { userId: new mongoose.Types.ObjectId(req.user.id) }
-      : {};
-    if (req.user.role === "Faculty" && !mongoose.Types.ObjectId.isValid(req.user.id)) {
-      return res.status(400).json({ message: "Invalid user session. Please login again." });
+    const filters = [];
+    const params = [];
+
+    if (req.user.role === "Faculty") {
+      const userId = toIntId(req.user.id);
+      if (!userId) {
+        return res.status(400).json({ message: "Invalid user session. Please login again." });
+      }
+      filters.push("f.user_id = ?");
+      params.push(userId);
     }
+
     const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
     const department =
       typeof req.query.department === "string" ? req.query.department.trim() : "";
@@ -179,146 +257,90 @@ export async function listFaculty(req, res) {
     const shouldPaginate = page > 0 && limit > 0;
 
     if (department && department.toLowerCase() !== "all") {
-      filter.department = new RegExp(`^${escapeRegex(department)}$`, "i");
+      filters.push("LOWER(f.department) = LOWER(?)");
+      params.push(department);
     }
 
     if (semester && semester.toLowerCase() !== "all") {
-      filter.semester = new RegExp(`^${escapeRegex(semester)}$`, "i");
+      filters.push("LOWER(f.semester) = LOWER(?)");
+      params.push(semester);
     }
 
     if (academicYear && academicYear.toLowerCase() !== "all") {
-      filter.academic_year = new RegExp(`^${escapeRegex(academicYear)}$`, "i");
+      filters.push("LOWER(f.academic_year) = LOWER(?)");
+      params.push(academicYear);
     }
 
     if (search) {
-      const regex = new RegExp(escapeRegex(search), "i");
-      filter.$or = [{ name: regex }, { department: regex }, { subject: regex }];
+      const like = `%${search.toLowerCase()}%`;
+      filters.push(
+        "(LOWER(f.name) LIKE ? OR LOWER(f.department) LIKE ? OR LOWER(f.subject) LIKE ?)"
+      );
+      params.push(like, like, like);
     }
 
-    const basePipeline = [
-      { $match: filter },
-      {
-        $lookup: {
-          from: "feedbacks",
-          localField: "_id",
-          foreignField: "facultyId",
-          as: "feedbacks"
-        }
-      },
-      {
-        $addFields: {
-          avg_rating: {
-            $cond: [
-              { $gt: [{ $size: "$feedbacks" }, 0] },
-              { $round: [{ $avg: "$feedbacks.rating" }, 2] },
-              null
-            ]
-          }
-        }
-      },
-      {
-        $addFields: {
-          quality_status: {
-            $cond: [
-              {
-                $eq: ["$avg_rating", null]
-              },
-              "Pending Evaluation",
-              {
-                $cond: [
-                  {
-                    $and: [
-                      { $gte: ["$pass_percentage", 75] },
-                      { $gte: ["$avg_rating", 4] }
-                    ]
-                  },
-                  "Good",
-                  "Need Improvement"
-                ]
-              }
-            ]
-          }
-        }
-      }
-    ];
+    const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
 
     if (shouldPaginate && req.user.role === "Admin") {
       const pageNumber = Math.max(1, page);
       const pageSize = Math.max(1, Math.min(50, limit));
-      const skip = (pageNumber - 1) * pageSize;
+      const offset = (pageNumber - 1) * pageSize;
 
-      const results = await Faculty.aggregate([
-        ...basePipeline,
-        {
-          $facet: {
-            data: [
-              { $sort: { createdAt: -1 } },
-              { $skip: skip },
-              { $limit: pageSize },
-              {
-                $addFields: {
-                  id: { $toString: "$_id" },
-                  user_id: {
-                    $cond: [{ $ifNull: ["$userId", false] }, { $toString: "$userId" }, null]
-                  },
-                  subject_id: {
-                    $cond: [{ $ifNull: ["$subjectId", false] }, { $toString: "$subjectId" }, null]
-                  }
-                }
-              },
-              {
-                $project: {
-                  _id: 0,
-                  __v: 0,
-                  feedbacks: 0,
-                  userId: 0,
-                  subjectId: 0
-                }
-              }
-            ],
-            totalCount: [{ $count: "count" }]
-          }
-        }
-      ]);
-
-      const payload = results[0] || { data: [], totalCount: [] };
-      const totalCount = payload.totalCount[0]?.count || 0;
+      const countRows = await query(
+        `SELECT COUNT(*) AS count FROM faculty f ${whereClause}`,
+        params
+      );
+      const totalCount = countRows[0]?.count || 0;
       const totalPages = totalCount ? Math.ceil(totalCount / pageSize) : 1;
 
+      const rows = await query(
+        `
+          SELECT
+            f.*,
+            ROUND(AVG(fb.rating), 2) AS avg_rating,
+            CASE
+              WHEN AVG(fb.rating) IS NULL THEN 'Pending Evaluation'
+              WHEN f.pass_percentage >= 75 AND AVG(fb.rating) >= 4 THEN 'Good'
+              ELSE 'Need Improvement'
+            END AS quality_status
+          FROM faculty f
+          LEFT JOIN feedbacks fb ON fb.faculty_id = f.id
+          ${whereClause}
+          GROUP BY f.id
+          ORDER BY f.created_at DESC
+          LIMIT ? OFFSET ?
+        `,
+        [...params, pageSize, offset]
+      );
+
       return res.json({
-        data: payload.data,
+        data: rows.map(mapFacultyRow),
         page: pageNumber,
         totalPages,
         totalCount
       });
     }
 
-    const docs = await Faculty.aggregate([
-      ...basePipeline,
-      {
-        $addFields: {
-          id: { $toString: "$_id" },
-          user_id: {
-            $cond: [{ $ifNull: ["$userId", false] }, { $toString: "$userId" }, null]
-          },
-          subject_id: {
-            $cond: [{ $ifNull: ["$subjectId", false] }, { $toString: "$subjectId" }, null]
-          }
-        }
-      },
-      {
-        $project: {
-          _id: 0,
-          __v: 0,
-          feedbacks: 0,
-          userId: 0,
-          subjectId: 0
-        }
-      },
-      { $sort: { createdAt: -1 } }
-    ]);
+    const rows = await query(
+      `
+        SELECT
+          f.*,
+          ROUND(AVG(fb.rating), 2) AS avg_rating,
+          CASE
+            WHEN AVG(fb.rating) IS NULL THEN 'Pending Evaluation'
+            WHEN f.pass_percentage >= 75 AND AVG(fb.rating) >= 4 THEN 'Good'
+            ELSE 'Need Improvement'
+          END AS quality_status
+        FROM faculty f
+        LEFT JOIN feedbacks fb ON fb.faculty_id = f.id
+        ${whereClause}
+        GROUP BY f.id
+        ORDER BY f.created_at DESC
+      `,
+      params
+    );
 
-    return res.json(docs);
+    return res.json(rows.map(mapFacultyRow));
   } catch (err) {
     console.error("Faculty list error:", err);
     return res.status(500).json({ message: "Failed to fetch faculty data.", error: err.message });
@@ -327,12 +349,16 @@ export async function listFaculty(req, res) {
 
 export async function getFacultyHistory(req, res) {
   const { id } = req.params || {};
-  if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+  const facultyId = toIntId(id);
+  if (!facultyId) {
     return res.status(400).json({ message: "Invalid faculty id." });
   }
 
   try {
-    const baseDoc = await Faculty.findById(id);
+    const baseRows = await query("SELECT * FROM faculty WHERE id = ? LIMIT 1", [
+      facultyId
+    ]);
+    const baseDoc = baseRows[0];
     if (!baseDoc) {
       return res.status(404).json({ message: "Faculty record not found." });
     }
@@ -342,80 +368,57 @@ export async function getFacultyHistory(req, res) {
     const academicYear =
       typeof req.query.academic_year === "string" ? req.query.academic_year.trim() : "";
 
-    const filter = {
-      name: baseDoc.name,
-      department: baseDoc.department
-    };
+    const filters = ["f.name = ?", "f.department = ?"];
+    const params = [baseDoc.name, baseDoc.department];
 
     if (semester && semester.toLowerCase() !== "all") {
-      filter.semester = new RegExp(`^${escapeRegex(semester)}$`, "i");
+      filters.push("LOWER(f.semester) = LOWER(?)");
+      params.push(semester);
     }
 
     if (academicYear && academicYear.toLowerCase() !== "all") {
-      filter.academic_year = new RegExp(`^${escapeRegex(academicYear)}$`, "i");
+      filters.push("LOWER(f.academic_year) = LOWER(?)");
+      params.push(academicYear);
     }
 
-    const rows = await Faculty.aggregate([
-      { $match: filter },
-      {
-        $lookup: {
-          from: "feedbacks",
-          localField: "_id",
-          foreignField: "facultyId",
-          as: "feedbacks"
-        }
-      },
-      {
-        $addFields: {
-          avg_rating: {
-            $cond: [
-              { $gt: [{ $size: "$feedbacks" }, 0] },
-              { $round: [{ $avg: "$feedbacks.rating" }, 2] },
-              null
-            ]
-          }
-        }
-      },
-      {
-        $addFields: {
-          quality_status: {
-            $cond: [
-              { $eq: ["$avg_rating", null] },
-              "Pending Evaluation",
-              {
-                $cond: [
-                  {
-                    $and: [
-                      { $gte: ["$pass_percentage", 75] },
-                      { $gte: ["$avg_rating", 4] }
-                    ]
-                  },
-                  "Good",
-                  "Need Improvement"
-                ]
-              }
-            ]
-          }
-        }
-      },
-      {
-        $project: {
-          _id: 0,
-          id: { $toString: "$_id" },
-          name: 1,
-          department: 1,
-          subject: 1,
-          semester: 1,
-          academic_year: 1,
-          pass_percentage: 1,
-          avg_rating: 1,
-          quality_status: 1
-        }
-      },
-      { $sort: { academic_year: -1, semester: -1, createdAt: -1 } }
-    ]);
+    const rows = await query(
+      `
+        SELECT
+          f.id,
+          f.name,
+          f.department,
+          f.subject,
+          f.semester,
+          f.academic_year,
+          f.pass_percentage,
+          ROUND(AVG(fb.rating), 2) AS avg_rating,
+          CASE
+            WHEN AVG(fb.rating) IS NULL THEN 'Pending Evaluation'
+            WHEN f.pass_percentage >= 75 AND AVG(fb.rating) >= 4 THEN 'Good'
+            ELSE 'Need Improvement'
+          END AS quality_status
+        FROM faculty f
+        LEFT JOIN feedbacks fb ON fb.faculty_id = f.id
+        WHERE ${filters.join(" AND ")}
+        GROUP BY f.id
+        ORDER BY f.academic_year DESC, f.semester DESC, f.created_at DESC
+      `,
+      params
+    );
 
-    return res.json(rows);
+    return res.json(
+      rows.map((row) => ({
+        id: String(row.id),
+        name: row.name,
+        department: row.department,
+        subject: row.subject,
+        semester: row.semester,
+        academic_year: row.academic_year,
+        pass_percentage: row.pass_percentage === null ? null : Number(row.pass_percentage),
+        avg_rating: row.avg_rating === null ? null : Number(row.avg_rating),
+        quality_status: row.quality_status
+      }))
+    );
   } catch (err) {
     return res.status(500).json({ message: "Failed to fetch faculty history.", error: err.message });
   }
@@ -423,18 +426,22 @@ export async function getFacultyHistory(req, res) {
 
 export async function deleteFaculty(req, res) {
   const { id } = req.params || {};
-  if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+  const facultyId = toIntId(id);
+  if (!facultyId) {
     return res.status(400).json({ message: "Invalid faculty id." });
   }
 
   try {
-    const doc = await Faculty.findByIdAndDelete(id);
-    if (!doc) {
+    const rows = await query("SELECT id FROM faculty WHERE id = ? LIMIT 1", [
+      facultyId
+    ]);
+    if (!rows.length) {
       return res.status(404).json({ message: "Faculty record not found." });
     }
 
-    await Subject.updateMany({ facultyId: doc._id }, { $set: { facultyId: null } });
-    await Feedback.deleteMany({ facultyId: doc._id });
+    await query("DELETE FROM faculty WHERE id = ?", [facultyId]);
+    await query("UPDATE subjects SET faculty_id = NULL WHERE faculty_id = ?", [facultyId]);
+    await query("DELETE FROM feedbacks WHERE faculty_id = ?", [facultyId]);
 
     return res.status(204).send();
   } catch (err) {
@@ -444,106 +451,70 @@ export async function deleteFaculty(req, res) {
 
 export async function getFacultyStats(req, res) {
   try {
-    const rows = await Faculty.aggregate([
-      {
-        $lookup: {
-          from: "feedbacks",
-          localField: "_id",
-          foreignField: "facultyId",
-          as: "feedbacks"
-        }
-      },
-      {
-        $addFields: {
-          avg_rating: {
-            $cond: [
-              { $gt: [{ $size: "$feedbacks" }, 0] },
-              { $avg: "$feedbacks.rating" },
-              null
-            ]
-          }
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          total_faculty: { $sum: 1 },
-          avg_pass_percentage: { $avg: "$pass_percentage" },
-          avg_rating: { $avg: "$avg_rating" }
-        }
-      }
-    ]);
+    const statsRows = await query(
+      `
+        SELECT
+          COUNT(*) AS total_faculty,
+          AVG(pass_percentage) AS avg_pass_percentage,
+          AVG(avg_rating) AS avg_rating
+        FROM (
+          SELECT f.id, f.pass_percentage, AVG(fb.rating) AS avg_rating
+          FROM faculty f
+          LEFT JOIN feedbacks fb ON fb.faculty_id = f.id
+          GROUP BY f.id
+        ) summary
+      `
+    );
 
-    const stats = rows[0] || {
+    const stats = statsRows[0] || {
       total_faculty: 0,
       avg_pass_percentage: null,
       avg_rating: null
     };
 
-    const departmentSummary = await Faculty.aggregate([
-      {
-        $group: {
-          _id: "$department",
-          avg_pass_percentage: { $avg: "$pass_percentage" },
-          total_records: { $sum: 1 }
-        }
-      },
-      { $sort: { _id: 1 } }
-    ]);
+    const departmentSummary = await query(
+      `
+        SELECT department, AVG(pass_percentage) AS avg_pass_percentage, COUNT(*) AS total_records
+        FROM faculty
+        GROUP BY department
+        ORDER BY department
+      `
+    );
 
-    const topFacultyRows = await Faculty.aggregate([
-      {
-        $lookup: {
-          from: "feedbacks",
-          localField: "_id",
-          foreignField: "facultyId",
-          as: "feedbacks"
-        }
-      },
-      {
-        $addFields: {
-          avg_rating: {
-            $cond: [
-              { $gt: [{ $size: "$feedbacks" }, 0] },
-              { $avg: "$feedbacks.rating" },
-              null
-            ]
-          }
-        }
-      },
-      { $match: { avg_rating: { $ne: null } } },
-      { $sort: { avg_rating: -1 } },
-      { $limit: 1 },
-      {
-        $project: {
-          _id: 1,
-          name: 1,
-          department: 1,
-          subject: 1,
-          avg_rating: { $round: ["$avg_rating", 2] }
-        }
-      }
-    ]);
+    const topFacultyRows = await query(
+      `
+        SELECT t.id, t.name, t.department, t.subject, ROUND(t.avg_rating, 2) AS avg_rating
+        FROM (
+          SELECT f.id, f.name, f.department, f.subject, AVG(fb.rating) AS avg_rating
+          FROM faculty f
+          LEFT JOIN feedbacks fb ON fb.faculty_id = f.id
+          GROUP BY f.id
+        ) t
+        WHERE t.avg_rating IS NOT NULL
+        ORDER BY t.avg_rating DESC
+        LIMIT 1
+      `
+    );
 
     const topFaculty = topFacultyRows[0]
       ? {
-          id: topFacultyRows[0]._id.toString(),
+          id: String(topFacultyRows[0].id),
           name: topFacultyRows[0].name,
           department: topFacultyRows[0].department,
           subject: topFacultyRows[0].subject,
-          avg_rating: topFacultyRows[0].avg_rating
+          avg_rating: Number(topFacultyRows[0].avg_rating)
         }
       : null;
 
     return res.json({
       total_faculty: stats.total_faculty ?? 0,
       average_pass_percentage:
-        stats.avg_pass_percentage === null ? null : Number(stats.avg_pass_percentage.toFixed(2)),
-      average_rating: stats.avg_rating === null ? null : Number(stats.avg_rating.toFixed(2)),
+        stats.avg_pass_percentage === null ? null : Number(Number(stats.avg_pass_percentage).toFixed(2)),
+      average_rating: stats.avg_rating === null ? null : Number(Number(stats.avg_rating).toFixed(2)),
       department_summary: departmentSummary.map((row) => ({
-        department: row._id,
+        department: row.department,
         average_pass_percentage:
-          row.avg_pass_percentage === null ? null : Number(row.avg_pass_percentage.toFixed(2)),
+          row.avg_pass_percentage === null ? null : Number(Number(row.avg_pass_percentage).toFixed(2)),
         total_records: row.total_records
       })),
       top_faculty: topFaculty

@@ -1,7 +1,5 @@
 import bcrypt from "bcrypt";
-import { connectDb } from "../db.js";
-import User from "../models/User.js";
-import Subject from "../models/Subject.js";
+import { connectDb, query } from "../db.js";
 
 async function seed() {
   await connectDb();
@@ -14,10 +12,15 @@ async function seed() {
 
   for (const user of users) {
     const hash = await bcrypt.hash(user.password, 10);
-    await User.findOneAndUpdate(
-      { username: user.username },
-      { username: user.username, password: hash, role: user.role },
-      { upsert: true, new: true }
+    await query(
+      `
+        INSERT INTO users (username, password, role)
+        VALUES (?, ?, ?)
+        ON CONFLICT(username) DO UPDATE SET
+          password = excluded.password,
+          role = excluded.role
+      `,
+      [user.username, hash, user.role]
     );
   }
 
@@ -105,10 +108,14 @@ async function seed() {
   ];
 
   for (const name of defaultSubjects) {
-    await Subject.findOneAndUpdate(
-      { name },
-      { name, facultyId: null },
-      { upsert: true, new: true }
+    await query(
+      `
+        INSERT INTO subjects (name, faculty_id)
+        VALUES (?, NULL)
+        ON CONFLICT(name) DO UPDATE SET
+          name = excluded.name
+      `,
+      [name]
     );
   }
 

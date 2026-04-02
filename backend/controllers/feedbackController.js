@@ -1,8 +1,23 @@
-import mongoose from "mongoose";
-import Feedback from "../models/Feedback.js";
-import Faculty from "../models/Faculty.js";
-import Notification from "../models/Notification.js";
-import Subject from "../models/Subject.js";
+import { query } from "../db.js";
+
+function toIntId(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function mapFeedbackRow(row) {
+  return {
+    id: String(row.id),
+    student_id: String(row.student_id),
+    faculty_id: String(row.faculty_id),
+    subject_id: String(row.subject_id),
+    rating: row.rating,
+    comment: row.comment ?? "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
 
 export async function submitFeedback(req, res) {
   const { faculty_id, rating, comment } = req.body || {};
@@ -16,7 +31,8 @@ export async function submitFeedback(req, res) {
     return res.status(400).json({ message: "Faculty and rating are required." });
   }
 
-  if (!mongoose.Types.ObjectId.isValid(faculty_id)) {
+  const facultyId = toIntId(faculty_id);
+  if (!facultyId) {
     return res.status(400).json({ message: "Invalid faculty id." });
   }
 
@@ -26,21 +42,35 @@ export async function submitFeedback(req, res) {
   }
 
   try {
-    const faculty = await Faculty.findById(faculty_id);
+    const facultyRows = await query("SELECT * FROM faculty WHERE id = ? LIMIT 1", [
+      facultyId
+    ]);
+    const faculty = facultyRows[0];
     if (!faculty) {
       return res.status(404).json({ message: "Faculty record not found." });
     }
 
-    let subjectId = faculty.subjectId;
+    let subjectId = faculty.subject_id;
     if (!subjectId) {
       const normalized = String(faculty.subject || "").trim();
       if (normalized) {
-        let subject = await Subject.findOne({ name: normalized });
-        if (!subject) {
-          subject = await Subject.create({ name: normalized, facultyId: faculty._id });
+        const existingSubject = await query(
+          "SELECT id FROM subjects WHERE name = ? LIMIT 1",
+          [normalized]
+        );
+        if (existingSubject.length) {
+          subjectId = existingSubject[0].id;
+        } else {
+          const created = await query(
+            "INSERT INTO subjects (name, faculty_id) VALUES (?, ?)",
+            [normalized, faculty.id]
+          );
+          subjectId = created.insertId;
         }
-        subjectId = subject._id;
-        await Faculty.updateOne({ _id: faculty._id }, { $set: { subjectId } });
+        await query("UPDATE faculty SET subject_id = ? WHERE id = ?", [
+          subjectId,
+          faculty.id
+        ]);
       }
     }
 
@@ -48,47 +78,54 @@ export async function submitFeedback(req, res) {
       return res.status(400).json({ message: "Faculty subject not configured yet." });
     }
 
-    const doc = await Feedback.create({
-      studentId: student_id,
-      facultyId: faculty_id,
-      subjectId,
-      rating: ratingValue,
-      comment: comment || ""
-    });
+    const studentId = toIntId(student_id);
+    if (!studentId) {
+      return res.status(401).json({ message: "Invalid session. Please login again." });
+    }
 
-    const stats = await Feedback.aggregate([
-      { $match: { facultyId: new mongoose.Types.ObjectId(faculty_id) } },
-      { $group: { _id: "$facultyId", avg_rating: { $avg: "$rating" } } }
-    ]);
+    const result = await query(
+      `
+        INSERT INTO feedbacks (student_id, faculty_id, subject_id, rating, comment)
+        VALUES (?, ?, ?, ?, ?)
+      `,
+      [studentId, facultyId, subjectId, ratingValue, comment || ""]
+    );
 
-    const avgRating = stats[0]?.avg_rating ?? null;
+    const avgRows = await query(
+      "SELECT AVG(rating) AS avg_rating FROM feedbacks WHERE faculty_id = ?",
+      [facultyId]
+    );
+    const avgRating = avgRows[0]?.avg_rating ?? null;
     if (avgRating !== null) {
       const previousStatus = faculty.quality_status;
       const quality_status =
         avgRating === null
           ? "Pending Evaluation"
-          : faculty.pass_percentage >= 75 && avgRating >= 4
+          : Number(faculty.pass_percentage) >= 75 && avgRating >= 4
             ? "Good"
             : "Need Improvement";
-      await Faculty.updateOne(
-        { _id: faculty._id },
-        { $set: { quality_status } }
-      );
+      await query("UPDATE faculty SET quality_status = ? WHERE id = ?", [
+        quality_status,
+        facultyId
+      ]);
 
       if (previousStatus !== "Need Improvement" && quality_status === "Need Improvement") {
-        await Notification.create({
-          message: `${faculty.name} performance needs improvement`
-        });
+        await query("INSERT INTO notifications (message) VALUES (?)", [
+          `${faculty.name} performance needs improvement`
+        ]);
       }
 
-      await Notification.create({
-        message: `Feedback submitted for ${faculty.name}`
-      });
+      await query("INSERT INTO notifications (message) VALUES (?)", [
+        `Feedback submitted for ${faculty.name}`
+      ]);
     }
 
-    return res.status(201).json(doc.toJSON());
+    const feedbackRows = await query("SELECT * FROM feedbacks WHERE id = ? LIMIT 1", [
+      result.insertId
+    ]);
+    return res.status(201).json(mapFeedbackRow(feedbackRows[0]));
   } catch (err) {
-    if (err.code === 11000) {
+    if (err.code === "ER_DUP_ENTRY") {
       return res.status(409).json({ message: "Feedback already submitted for this subject." });
     }
     return res.status(500).json({ message: "Failed to submit feedback.", error: err.message });

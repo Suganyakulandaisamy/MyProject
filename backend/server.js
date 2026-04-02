@@ -29,6 +29,6 @@ connectDb()
     });
   })
   .catch((err) => {
-    console.error("Failed to connect to MongoDB:", err.message);
+    console.error("Failed to connect to SQLite:", err.message);
     process.exit(1);
   });
